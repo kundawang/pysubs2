@@ -13,7 +13,7 @@ API Reference
 -------------------------------
 
 .. autoclass:: pysubs2.SSAFile
-   :members: events, styles, info, fps, format, aegisub_project, fonts_opaque
+   :members: events, styles, info, fps, format, aegisub_project, fonts_opaque, graphics_opaque
 
 Reading and writing subtitles
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -47,6 +47,28 @@ Working with styles
 
 .. automethod:: SSAFile.rename_style
 .. automethod:: SSAFile.import_styles
+
+Working with attachments
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autoattribute:: SSAFile.fonts
+.. autoattribute:: SSAFile.graphics
+
+.. automethod:: SSAFile.get_attachment
+.. automethod:: SSAFile.set_attachment
+.. automethod:: SSAFile.add_attachment
+.. automethod:: SSAFile.replace_attachment
+.. automethod:: SSAFile.remove_attachment
+.. automethod:: SSAFile.rename_attachment
+.. automethod:: SSAFile.import_attachments
+
+.. autoclass:: pysubs2.attachments.AttachmentMapping
+   :members:
+
+.. autofunction:: pysubs2.attachments.decode_attachment
+.. autofunction:: pysubs2.attachments.encode_attachment
+.. autofunction:: pysubs2.attachments.guess_attachment_kind
+.. autofunction:: pysubs2.attachments.validate_attachment
 
 Misc methods
 ~~~~~~~~~~~~

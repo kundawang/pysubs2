@@ -144,6 +144,34 @@ You can also create a :class:`pysubs2.SSAStyle` directly, specifying the attribu
 
 .. tip:: Renaming a style is a little difficult, because you also have to fix all references to the old name. The :meth:`pysubs2.SSAFile.rename_style()` method does what's needed behind the scenes.
 
+Working with embedded fonts and images
+--------------------------------------
+
+A SubStation file can carry binary attachments in its ``[Fonts]`` and ``[Graphics]`` sections.
+pysubs2 keeps their encoded lines in :attr:`pysubs2.SSAFile.fonts_opaque` and
+:attr:`pysubs2.SSAFile.graphics_opaque`, and exposes the decoded payloads through the
+:attr:`pysubs2.SSAFile.fonts` and :attr:`pysubs2.SSAFile.graphics` mappings:
+
+::
+
+    >>> subs = pysubs2.load("subtitles-with-embedded-fonts.ass")
+    >>> font_bytes = subs.fonts["MyFont_0.ttf"]
+    >>> image_bytes = subs.graphics["logo.png"]
+
+Assigning to a mapping adds or replaces an attachment, which is re-encoded when saving.
+Attachments you do not touch are written back exactly as they were read:
+
+::
+
+    >>> subs.fonts["AnotherFont.ttf"] = Path("AnotherFont.ttf").read_bytes()
+    >>> subs.save("output.ass")
+
+There are also named methods for the common operations, which work with names in either section:
+:meth:`pysubs2.SSAFile.get_attachment()`, :meth:`pysubs2.SSAFile.add_attachment()`,
+:meth:`pysubs2.SSAFile.replace_attachment()`, :meth:`pysubs2.SSAFile.remove_attachment()` and
+:meth:`pysubs2.SSAFile.rename_attachment()`. If the data is damaged, the reader raises
+:class:`pysubs2.exceptions.AttachmentError` with the line number in the source file.
+
 Saving subtitle file
 --------------------
 

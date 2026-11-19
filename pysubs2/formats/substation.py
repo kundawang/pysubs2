@@ -5,7 +5,9 @@ import re
 import warnings
 from typing import TYPE_CHECKING, Any, NotRequired, TextIO, TypedDict, Unpack, override
 
+from ..attachments import MAX_ATTACHMENT_SIZE, validate_attachment
 from ..common import SSA_ALIGNMENT, Alignment, Color
+from ..exceptions import AttachmentError
 from ..ssaevent import SSAEvent
 from ..ssastyle import SSAStyle
 from ..time import TIMESTAMP, TIMESTAMP_SHORT, make_time, ms_to_times, timestamp_to_ms
@@ -34,7 +36,9 @@ SECTION_HEADING = re.compile(
     r"]"  # close square bracket
 )
 
-ATTACHMENT_FILE_HEADING = re.compile(r"(fontname|filename):\s+(?P<name>\S+)")
+#: Heading line of an attachment. The name is everything after the colon;
+#: it may contain spaces but is stored stripped.
+ATTACHMENT_FILE_HEADING = re.compile(r"^(fontname|filename)\s*:\s*(?P<name>.*?)\s*$")
 
 STYLE_FORMAT_LINE = {
     "ass": "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic,"
@@ -170,7 +174,9 @@ class SubstationFormat(FormatBase):
     """SubStation Alpha (ASS, SSA) subtitle format implementation"""
 
     class ReaderArgs(TypedDict):
-        pass
+        max_attachment_size: NotRequired[int | None]
+        """Maximum decoded size of one attachment in bytes (default 64 MiB).
+        ``None`` disables the limit."""
 
     class WriterArgs(TypedDict):
         header_notice: NotRequired[str]
@@ -213,19 +219,55 @@ class SubstationFormat(FormatBase):
         subs.fonts_opaque.clear()
         subs.graphics_opaque.clear()
 
+        max_attachment_size = kwargs.get("max_attachment_size", MAX_ATTACHMENT_SIZE)
+
         inside_info_section = False
         inside_aegisub_section = False
         inside_font_section = False
         inside_graphic_section = False
-        current_attachment_name = None
-        current_attachment_lines_buffer: list[str] = []
-        current_attachment_is_font = None
+        current_attachment_name: str | None = None
+        current_attachment_lineno: int | None = None
+        current_attachment_lines: list[tuple[str, int]] = []
+        current_attachment_is_font = False
+        lineno = 0
+
+        def store_attachment() -> None:
+            """Store the attachment being read, validating it first."""
+            nonlocal current_attachment_name, current_attachment_lineno
+
+            if current_attachment_name is None:
+                return
+
+            name = current_attachment_name
+            if name in subs.fonts_opaque or name in subs.graphics_opaque:
+                raise AttachmentError(
+                    "duplicate attachment name",
+                    name=name,
+                    line=current_attachment_lineno,
+                )
+
+            validate_attachment(
+                current_attachment_lines,
+                name=name,
+                lineno=current_attachment_lineno,
+                max_size=max_attachment_size,
+            )
+
+            target = subs.fonts_opaque if current_attachment_is_font else subs.graphics_opaque
+            target[name] = [text for text, _ in current_attachment_lines]
+            logger.debug("at line %d: finished attachment definition %s", lineno, name)
+
+            current_attachment_lines.clear()
+            current_attachment_name = None
+            current_attachment_lineno = None
 
         for lineno, line in enumerate(fp, 1):
             line = line.strip()
 
             if SECTION_HEADING.match(line):
                 logger.debug("at line %d: section heading %s", lineno, line)
+                # A new section terminates any pending attachment.
+                store_attachment()
                 inside_info_section = "Info" in line
                 inside_aegisub_section = "Aegisub" in line
                 inside_font_section = "Fonts" in line
@@ -243,28 +285,41 @@ class SubstationFormat(FormatBase):
                     pass
             elif inside_font_section or inside_graphic_section:
                 m = ATTACHMENT_FILE_HEADING.match(line)
-                current_attachment_is_font = inside_font_section
-
-                if current_attachment_name and (m or not line):
-                    # flush last font/picture on newline or new font/picture name
-                    attachment_data = current_attachment_lines_buffer[:]
-                    if inside_font_section:
-                        subs.fonts_opaque[current_attachment_name] = attachment_data
-                    elif inside_graphic_section:
-                        subs.graphics_opaque[current_attachment_name] = attachment_data
-                    else:
-                        raise NotImplementedError("Bad attachment section, expected [Fonts] or [Graphics]")
-                    logger.debug("at line %d: finished attachment definition %s", lineno, current_attachment_name)
-                    current_attachment_lines_buffer.clear()
-                    current_attachment_name = None
 
                 if m:
-                    # start new font/picture
+                    # A new attachment starts here; the previous one ends.
+                    store_attachment()
+
+                    keyword = m.group(1)
+                    expected_keyword = "fontname" if inside_font_section else "filename"
+                    section_name = "Fonts" if inside_font_section else "Graphics"
+                    if keyword != expected_keyword:
+                        raise AttachmentError(
+                            f"{keyword!r} is not valid in the [{section_name}] section, "
+                            f"expected {expected_keyword!r}",
+                            line=lineno,
+                        )
+
                     attachment_name = m.group("name")
+                    if not attachment_name:
+                        raise AttachmentError(
+                            "attachment name must not be empty",
+                            line=lineno,
+                        )
+
                     current_attachment_name = attachment_name
-                elif line:
-                    # add non-empty line to current buffer
-                    current_attachment_lines_buffer.append(line)
+                    current_attachment_lineno = lineno
+                    current_attachment_is_font = inside_font_section
+                elif not line:
+                    # A blank line terminates the attachment.
+                    store_attachment()
+                elif current_attachment_name is None:
+                    raise AttachmentError(
+                        "attachment data appears before any attachment name",
+                        line=lineno,
+                    )
+                else:
+                    current_attachment_lines.append((line, lineno))
             elif line.startswith("Style:"):
                 _, rest = line.split(":", 1)
                 buf = rest.strip().split(",")
@@ -280,19 +335,9 @@ class SubstationFormat(FormatBase):
                 ev = SSAEvent(**field_dict)
                 subs.events.append(ev)
 
-        # cleanup fonts/pictures
-        if current_attachment_name:
-            # flush last font on EOF or new section w/o newline
-            attachment_data = current_attachment_lines_buffer[:]
-
-            if current_attachment_is_font:
-                subs.fonts_opaque[current_attachment_name] = attachment_data
-            else:
-                subs.graphics_opaque[current_attachment_name] = attachment_data
-
-            logger.debug("at EOF: finished attachment definition %s", current_attachment_name)
-            current_attachment_lines_buffer.clear()
-            current_attachment_name = None
+        # Flush the last attachment on EOF (or if the section ended without a
+        # blank line).
+        store_attachment()
 
     @staticmethod
     def _string_to_field(field: str, value: str, format_: str) -> Any:
@@ -389,9 +434,13 @@ class SubstationFormat(FormatBase):
             fields = [cls._field_to_string(f, getattr(sty, f), sty, format_) for f in STYLE_FIELDS[format_]]
             print(f"Style: {name}", *fields, sep=",", file=fp)
 
+        # Attachments are written in insertion order, which is the order in
+        # which they were read from the source file. Each attachment writes
+        # back its stored encoded lines; only modified attachments have been
+        # re-encoded.
         if subs.fonts_opaque:
             print("\n[Fonts]", file=fp)
-            for font_name, font_lines in sorted(subs.fonts_opaque.items()):
+            for font_name, font_lines in subs.fonts_opaque.items():
                 print(f"fontname: {font_name}", file=fp)
                 for line in font_lines:
                     print(line, file=fp)
@@ -399,7 +448,7 @@ class SubstationFormat(FormatBase):
 
         if subs.graphics_opaque:
             print("\n[Graphics]", file=fp)
-            for picture_name, picture_lines in sorted(subs.graphics_opaque.items()):
+            for picture_name, picture_lines in subs.graphics_opaque.items():
                 print(f"filename: {picture_name}", file=fp)
                 for line in picture_lines:
                     print(line, file=fp)

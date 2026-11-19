@@ -48,6 +48,24 @@ Example file::
 .. versionchanged:: 1.6.0
    Added support for embedded graphics.
 
+.. versionchanged:: 1.9.2
+   Embedded fonts and graphics can now be read and written as decoded binary
+   data through :attr:`pysubs2.SSAFile.fonts` and
+   :attr:`pysubs2.SSAFile.graphics`::
+
+       subs = pysubs2.load("subtitles.ass")
+       font_bytes = subs.fonts["MyFont_0.ttf"]
+
+       subs.fonts["MyFont_0.ttf"] = Path("MyFont.ttf").read_bytes()
+       subs.graphics["logo.png"] = Path("logo.png").read_bytes()
+
+   Attachments which are not modified are written back using their original
+   encoded lines. Damaged attachment data (invalid characters, truncated final
+   group, duplicate or empty names, data in the wrong section, oversized
+   payload) raises :class:`pysubs2.exceptions.AttachmentError` with the source
+   line number. The reader accepts an optional ``max_attachment_size``
+   parameter (default 64 MiB per attachment; ``None`` disables the limit).
+
 Time-based Formats
 ------------------
 

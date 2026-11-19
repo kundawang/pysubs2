@@ -1,6 +1,7 @@
 from typing import Any
 
 __all__ = [
+    "AttachmentError",
     "FormatAutodetectionError",
     "Pysubs2Error",
     "UnknownFPSError",
@@ -15,6 +16,41 @@ class Pysubs2Error(Exception):
 
 class UnknownFPSError(Pysubs2Error):
     """Framerate was not specified and couldn't be inferred otherwise."""
+
+
+class AttachmentError(Pysubs2Error):
+    """
+    Invalid embedded attachment (font or image) in a SubStation file.
+
+    Raised when an attachment in the ``[Fonts]`` or ``[Graphics]`` section
+    cannot be decoded (invalid encoding character, truncated final group,
+    oversized payload, duplicate or empty name, data in the wrong section),
+    or when an invalid name or payload is passed to the attachment API.
+
+    Attributes:
+        message (str): Error description without location details.
+        name (str | None): Attachment name, if known.
+        line (int | None): Source line number (1-based) of the offending
+            line, if known.
+    """
+
+    def __init__(self, message: str, name: str | None = None, line: int | None = None) -> None:
+        self.message = message
+        self.name = name
+        self.line = line
+
+        details = []
+        if line is not None:
+            details.append(f"line {line}")
+        if name is not None:
+            details.append(f"attachment {name!r}")
+        if details:
+            message = f"{message} ({', '.join(details)})"
+
+        super().__init__(message)
+
+    def __reduce__(self) -> Any:
+        return self.__class__, (self.message, self.name, self.line)
 
 
 class UnknownFileExtensionError(Pysubs2Error):

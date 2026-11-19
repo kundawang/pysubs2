@@ -1,6 +1,18 @@
 Release Notes
 =============
 
+**1.9.2** --- unreleased
+
+- SubStation attachments (embedded fonts and images) can now be read and written as decoded binary data
+  through the new :attr:`pysubs2.SSAFile.fonts` and :attr:`pysubs2.SSAFile.graphics` mappings, along with
+  ``get_attachment()``, ``set_attachment()``, ``add_attachment()``, ``replace_attachment()``,
+  ``remove_attachment()``, ``rename_attachment()`` and ``import_attachments()`` methods.
+  Attachments which are not modified are written back verbatim; modifying one attachment re-encodes only
+  that item and preserves the order of the others.
+- Damaged attachment data now raises :class:`pysubs2.exceptions.AttachmentError` with the source line number
+  (invalid encoding characters, truncated final group, duplicate or empty names, wrong section keyword,
+  oversized attachments). The reader accepts a ``max_attachment_size`` option (default 64 MiB per attachment).
+
 **1.9.1** --- released on 2026-10-30
 
 - SRT parser is more conservative about removing subtitle indices (Issue #119)

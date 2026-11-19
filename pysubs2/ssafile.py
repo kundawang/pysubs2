@@ -5,7 +5,16 @@ import logging
 from collections.abc import Iterable, Iterator, MutableSequence
 from itertools import chain
 from pathlib import Path
-from typing import Any, ClassVar, Literal, TextIO, Unpack, overload, override
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    TextIO,
+    Unpack,
+    overload,
+    override,
+)
 
 from .common import IntOrFloat, PathOrStr
 from .formats.jsonformat import JSONFormat
@@ -21,6 +30,9 @@ from .formats.whisper import WhisperJAXFormat
 from .ssaevent import SSAEvent
 from .ssastyle import SSAStyle
 from .time import make_time, ms_to_str
+
+if TYPE_CHECKING:
+    from .attachments import AttachmentMapping
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +58,13 @@ class SSAFile(MutableSequence[SSAEvent]):
         styles: Dict of :class:`SSAStyle` instances.
         info: Dict with script metadata, ie. ``[Script Info]``.
         aegisub_project: Dict with Aegisub project, ie. ``[Aegisub Project Garbage]``.
-        fonts_opaque: Dict with embedded fonts, ie. ``[Fonts]``.
-        graphics_opaque: Dict with embedded images, ie. ``[Graphics]``.
+        fonts_opaque: Dict with embedded fonts, ie. ``[Fonts]``, as encoded lines.
+        graphics_opaque: Dict with embedded images, ie. ``[Graphics]``, as encoded lines.
         fps: Framerate used when reading the file, if applicable.
         format: Format of source subtitle file, if applicable, eg. ``"srt"``.
 
+    Embedded attachments can also be read and written as binary data through
+    :attr:`SSAFile.fonts` and :attr:`SSAFile.graphics`.
     """
 
     DEFAULT_INFO: ClassVar[dict[str, str]] = {
@@ -1012,6 +1026,253 @@ class SSAFile(MutableSequence[SSAEvent]):
             # XXX also handle \r override tag
             if line.style == old_name:
                 line.style = new_name
+
+    # ------------------------------------------------------------------------
+    # Working with embedded attachments
+    # ------------------------------------------------------------------------
+
+    @property
+    def fonts(self) -> "AttachmentMapping":
+        """
+        Decoded view of the embedded fonts, ie. the ``[Fonts]`` section.
+
+        A mutable mapping of attachment names to binary ``bytes``, layered
+        over :attr:`SSAFile.fonts_opaque`::
+
+            subs = SSAFile.load("subtitles-with-fonts.ass")
+            font_bytes = subs.fonts["MyFont_0.ttf"]
+
+            subs.fonts["Another.ttf"] = Path("Another.ttf").read_bytes()
+            del subs.fonts["MyFont_0.ttf"]
+
+        Reading an item decodes its attachment data; assigning encodes it.
+        Attachments which are not assigned keep their original encoded lines
+        and are written back verbatim.
+        """
+        from .attachments import AttachmentMapping
+
+        return AttachmentMapping(self, "font")
+
+    @property
+    def graphics(self) -> "AttachmentMapping":
+        """
+        Decoded view of the embedded images, ie. the ``[Graphics]`` section.
+
+        Works like :attr:`SSAFile.fonts`.
+        """
+        from .attachments import AttachmentMapping
+
+        return AttachmentMapping(self, "graphics")
+
+    def get_attachment(self, name: str, kind: str | None = None) -> bytes:
+        """
+        Get the decoded binary data of an embedded attachment.
+
+        Arguments:
+            name (str): Attachment name, ie. the value of the ``fontname:`` or
+                ``filename:`` line.
+            kind (str): ``"font"``, ``"graphics"`` or ``None`` (default) to
+                search both sections.
+
+        Returns:
+            Attachment payload as ``bytes``.
+
+        Raises:
+            KeyError: No attachment with the given name.
+            AttachmentError: The stored attachment data is invalid.
+
+        """
+        from .attachments import decode_attachment, normalize_attachment_kind
+
+        if kind is None:
+            if name in self.fonts_opaque:
+                opaque = self.fonts_opaque
+            elif name in self.graphics_opaque:
+                opaque = self.graphics_opaque
+            else:
+                raise KeyError(name)
+        else:
+            normalized = normalize_attachment_kind(kind)
+            opaque = self.fonts_opaque if normalized == "font" else self.graphics_opaque
+            if name not in opaque:
+                raise KeyError(name)
+
+        return decode_attachment(opaque[name], name=name, max_size=None)
+
+    def set_attachment(self, name: str, data: bytes | bytearray | memoryview,
+                       kind: str | None = None) -> None:
+        """
+        Add or replace an embedded attachment.
+
+        When ``kind`` is not given, an existing attachment keeps its section;
+        a new one is placed in the ``[Fonts]`` or ``[Graphics]`` section based
+        on its filename (``.ttf``, ``.ttc``, ``.otf`` and ``.pfb`` are fonts,
+        everything else is a graphic).
+
+        Arguments:
+            name (str): Attachment name. Must be non-empty, without leading or
+                trailing whitespace or control characters.
+            data (bytes): Binary payload.
+            kind (str): ``"font"``, ``"graphics"`` or ``None`` (default).
+
+        Raises:
+            TypeError: ``data`` is not a bytes-like object or ``name`` is not
+                a string.
+            ValueError: Invalid name or kind.
+
+        """
+        from .attachments import (
+            encode_attachment,
+            guess_attachment_kind,
+            normalize_attachment_kind,
+            validate_attachment_name,
+        )
+
+        validate_attachment_name(name)
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError(f"Attachment data must be bytes, not {type(data).__name__}")
+
+        if kind is None:
+            if name in self.fonts_opaque:
+                normalized: str = "font"
+            elif name in self.graphics_opaque:
+                normalized = "graphics"
+            else:
+                normalized = guess_attachment_kind(name)
+        else:
+            normalized = normalize_attachment_kind(kind)
+
+        encoded = encode_attachment(data)
+        # Attachment names are unique across both sections.
+        if normalized == "font":
+            self.graphics_opaque.pop(name, None)
+            self.fonts_opaque[name] = encoded
+        else:
+            self.fonts_opaque.pop(name, None)
+            self.graphics_opaque[name] = encoded
+
+    def add_attachment(self, name: str, data: bytes | bytearray | memoryview,
+                       kind: str | None = None) -> None:
+        """
+        Add a new embedded attachment.
+
+        Unlike :meth:`SSAFile.set_attachment()`, this refuses to overwrite an
+        existing attachment with the same name (in either section).
+
+        Arguments:
+            name (str): Attachment name.
+            data (bytes): Binary payload.
+            kind (str): ``"font"``, ``"graphics"`` or ``None`` (default) to
+                guess from the filename.
+
+        Raises:
+            KeyError: An attachment with this name already exists.
+            ValueError: Invalid name or kind.
+
+        """
+        if name in self.fonts_opaque or name in self.graphics_opaque:
+            raise KeyError(f"Attachment {name!r} already exists")
+        self.set_attachment(name, data, kind)
+
+    def replace_attachment(self, name: str, data: bytes | bytearray | memoryview) -> None:
+        """
+        Replace the binary data of an existing attachment.
+
+        Only this attachment is re-encoded; its section and the order of
+        attachments, subtitle events and styles are preserved.
+
+        Arguments:
+            name (str): Attachment name.
+            data (bytes): New binary payload.
+
+        Raises:
+            KeyError: No attachment with the given name.
+
+        """
+        if name in self.fonts_opaque:
+            self.set_attachment(name, data, "font")
+        elif name in self.graphics_opaque:
+            self.set_attachment(name, data, "graphics")
+        else:
+            raise KeyError(name)
+
+    def remove_attachment(self, name: str) -> None:
+        """
+        Remove an embedded attachment from either section.
+
+        Raises:
+            KeyError: No attachment with the given name.
+
+        """
+        if name in self.fonts_opaque:
+            del self.fonts_opaque[name]
+        elif name in self.graphics_opaque:
+            del self.graphics_opaque[name]
+        else:
+            raise KeyError(name)
+
+    def rename_attachment(self, old_name: str, new_name: str) -> None:
+        """
+        Rename an embedded attachment, keeping its section and position.
+
+        Arguments:
+            old_name (str): Existing attachment name.
+            new_name (str): New name (must be unused).
+
+        Raises:
+            KeyError: No attachment named ``old_name``.
+            ValueError: ``new_name`` is invalid or already used.
+
+        """
+        from .attachments import validate_attachment_name
+
+        validate_attachment_name(new_name)
+        if old_name in self.fonts_opaque:
+            target = self.fonts_opaque
+        elif old_name in self.graphics_opaque:
+            target = self.graphics_opaque
+        else:
+            raise KeyError(old_name)
+
+        if new_name in self.fonts_opaque or new_name in self.graphics_opaque:
+            raise ValueError(f"There is already an attachment called {new_name!r}")
+
+        # Rebuilding the dict preserves the attachment's position.
+        items = [(new_name if key == old_name else key, value) for key, value in target.items()]
+        target.clear()
+        target.update(items)
+
+    def import_attachments(self, subs: "SSAFile", overwrite: bool = True) -> None:
+        """
+        Merge embedded attachments from another SSAFile.
+
+        Arguments:
+            subs (SSAFile): Subtitle file imported from.
+            overwrite (bool): On name conflict, use data from the other file
+                (default: True).
+
+        Raises:
+            TypeError: ``subs`` is not an :class:`SSAFile`.
+
+        """
+        if not isinstance(subs, SSAFile):
+            raise TypeError("Must supply an SSAFile.")
+        if subs is self:
+            return  # nothing to merge
+
+        for target, source in ((self.fonts_opaque, subs.fonts_opaque),
+                               (self.graphics_opaque, subs.graphics_opaque)):
+            for name, lines in list(source.items()):
+                if name in self.fonts_opaque or name in self.graphics_opaque:
+                    if not overwrite:
+                        continue
+                    self._remove_attachment_if_present(name)
+                target[name] = list(lines)
+
+    def _remove_attachment_if_present(self, name: str) -> None:
+        """Remove an attachment by name from either section, if present."""
+        self.fonts_opaque.pop(name, None)
+        self.graphics_opaque.pop(name, None)
 
     def import_styles(self, subs: "SSAFile", overwrite: bool = True) -> None:
         """

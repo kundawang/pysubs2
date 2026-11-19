@@ -1,4 +1,5 @@
-from . import cli, exceptions, formats, time
+from . import attachments, cli, exceptions, formats, time
+from .attachments import AttachmentMapping
 from .common import VERSION, Alignment, Color
 from .exceptions import *
 from .formats import whisper
@@ -9,10 +10,12 @@ from .ssastyle import SSAStyle
 __all__ = [
     "VERSION",
     "Alignment",
+    "AttachmentMapping",
     "Color",
     "SSAEvent",
     "SSAFile",
     "SSAStyle",
+    "attachments",
     "cli",
     "exceptions",
     "formats",
